@@ -1,0 +1,12 @@
+import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: true,
+    port: 5180,
+    // Allow importing ../shared/types.ts from outside the client root.
+    fs: { allow: ['..'] },
+  },
+});

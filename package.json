@@ -1,0 +1,14 @@
+{
+  "name": "quiz-clash",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Real-time team quiz battle: Red vs Blue, 2-10 players",
+  "scripts": {
+    "setup": "npm install && npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently -k -n SERVER,CLIENT -c cyan,magenta \"npm run dev --prefix server\" \"npm run dev --prefix client\"",
+    "build": "npm run build --prefix server && npm run build --prefix client"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
