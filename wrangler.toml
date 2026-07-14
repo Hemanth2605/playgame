@@ -1,13 +1,19 @@
-# Cloudflare Pages config for the Quiz Clash client.
+# Cloudflare Workers config for the Quiz Clash client.
 #
-# Pages reads pages_build_output_dir from here, so the "Build output directory"
-# field in the dashboard does not need to be set. The build command still does:
-#   npm install && npm install --prefix client && npm run build --prefix client
+# Cloudflare now steers new projects to Workers rather than Pages, so this
+# deploys the built React app as an assets-only Worker (no server script --
+# there is no `main` key on purpose).
 #
-# Only the client is deployed here. The Socket.IO server holds room state in
-# memory and runs on Render -- see README. Remember to set VITE_SERVER_URL as a
-# build-time environment variable in the Pages dashboard, or the client cannot
-# reach the server.
+# Only the client lives here. The Socket.IO server holds room state in memory
+# and needs a long-lived Node process, so it runs on Render instead -- see
+# README. VITE_SERVER_URL must be set as a BUILD-time variable in the
+# Cloudflare dashboard; Vite inlines it into the bundle, so it cannot be a
+# [vars] entry here.
 name = "playgame"
 compatibility_date = "2026-07-14"
-pages_build_output_dir = "client/dist"
+
+[assets]
+directory = "./client/dist"
+# The app is a single-page app: every route must serve index.html rather than
+# a 404, or a refresh mid-game would fall through to Cloudflare's 404.
+not_found_handling = "single-page-application"
