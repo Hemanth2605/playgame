@@ -33,11 +33,58 @@ Two easy options:
 1. **Quick tunnel (no deployment):** expose both ports with a tunnel tool, e.g.
    `ngrok http 5173` and `ngrok http 3001`, then create `client/.env` with
    `VITE_SERVER_URL=<your-3001-tunnel-url>` and restart the client.
-2. **Deploy (permanent):**
-   - Server → Render / Railway / Fly.io: build with `npm install && npm run build`
-     inside `server/`, start with `npm start`. It respects the `PORT` env var.
-   - Client → Vercel / Netlify: project root `client/`, build `npm run build`,
-     output `dist/`, and set the env var `VITE_SERVER_URL` to your server's URL.
+2. **Deploy (permanent):** client on Cloudflare Pages, server on Render — see below.
+
+## Deploying
+
+The client is a static site, but the server is a long-lived Node process: it holds
+every room in memory and drives rounds with timers. That rules out putting the server
+on Cloudflare Pages/Workers, so the two halves deploy to different hosts and are wired
+together with `VITE_SERVER_URL`.
+
+```
+Cloudflare Pages  ──  client/dist (static React app)
+        │
+        │  VITE_SERVER_URL  (baked in at build time)
+        ▼
+Render  ───────────  server/  (Node + Socket.IO, always on)
+```
+
+### 1. Server → Render
+
+`render.yaml` in this repo is a blueprint, so Render configures itself:
+
+1. **New → Blueprint** on [Render](https://dashboard.render.com), pick this repo, **Apply**.
+2. Copy the resulting URL, e.g. `https://quiz-clash-server.onrender.com`.
+
+Visiting that URL should print `Quiz Clash server is running`.
+
+> The free plan sleeps after ~15 minutes idle and takes ~30s to wake, so the first
+> player to open the app may wait. Keep the server at **one instance** — room state
+> lives in memory, so a second replica would strand players in the wrong game.
+
+### 2. Client → Cloudflare Pages
+
+**Workers & Pages → Create → Pages → Connect to Git**, pick this repo, then set:
+
+| Setting | Value |
+|---|---|
+| Framework preset | None |
+| Build command | `npm install && npm install --prefix client && npm run build --prefix client` |
+| Build output directory | `client/dist` |
+| Root directory | *(leave blank — the repo root)* |
+
+Add one **environment variable**, then deploy:
+
+| Variable | Value |
+|---|---|
+| `VITE_SERVER_URL` | your Render URL, e.g. `https://quiz-clash-server.onrender.com` |
+
+`VITE_SERVER_URL` is **required in production**. Vite inlines it at build time, so
+changing it means triggering a fresh deploy — and without it the client falls back to
+`<page-host>:3001`, which does not exist on Pages, and nobody can join a room.
+
+Every push to `main` now redeploys the client automatically.
 
 ## How the game works
 

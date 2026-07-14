@@ -1,0 +1,23 @@
+# Render blueprint for the Quiz Clash game server.
+# The client is deployed separately to Cloudflare Pages — see README.
+#
+# The server keeps all room state in memory, so it must run as a single
+# always-on instance. Do not scale this past one replica: two instances
+# would each hold a different half of the rooms and players would land
+# in the wrong game.
+services:
+  - type: web
+    name: quiz-clash-server
+    runtime: node
+    plan: free
+    numInstances: 1
+    # Install from the repo root first: server/package.json depends on the
+    # root package (`"quiz-clash": "file:.."`) for the shared/ types.
+    buildCommand: npm install && npm install --prefix server && npm run build --prefix server
+    startCommand: npm start --prefix server
+    # server/src/index.ts answers any GET with 200, which Render polls to
+    # confirm the instance is live.
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
