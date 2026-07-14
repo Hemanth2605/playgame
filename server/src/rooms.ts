@@ -348,11 +348,42 @@ export class RoomManager {
     if (!ctx) return;
     const { room, player, spec } = ctx;
     if (spec.kind !== 'quiz') return;
-    if (room.answers.has(player.id)) return;
+    // A quiz team answers as one: the first teammate to lock in speaks for the
+    // whole team. Without this an uneven match (2 reds vs 1 blue) would let the
+    // bigger team score twice on the same question.
+    if (this.teamHasAnswered(room, player.team)) return;
     if (!Number.isInteger(optionIndex) || optionIndex < 0 || optionIndex >= spec.q.options.length) return;
 
     room.answers.set(player.id, { at: Math.min(Date.now(), room.qEndsAt), optionIndex });
     this.afterAttempt(room);
+  }
+
+  /** Has anyone on this team already locked in an answer this round? */
+  private teamHasAnswered(room: Room, team: Team): boolean {
+    for (const p of room.players.values()) {
+      if (p.team === team && room.answers.has(p.id)) return true;
+    }
+    return false;
+  }
+
+  /** Teams that still have someone connected to play for them. */
+  private activeTeams(room: Room): Team[] {
+    const teams = new Set<Team>();
+    for (const p of room.players.values()) if (p.connected) teams.add(p.team);
+    return [...teams];
+  }
+
+  /**
+   * Is there nothing left to wait for? Quiz rounds are answered per team, every
+   * other game is answered per player, so the bar for "everyone is done" differs.
+   */
+  private roundComplete(room: Room): boolean {
+    const connected = [...room.players.values()].filter((p) => p.connected);
+    if (connected.length === 0) return false;
+    if (room.order[room.qIndex]?.kind === 'quiz') {
+      return this.activeTeams(room).every((t) => this.teamHasAnswered(room, t));
+    }
+    return connected.every((p) => room.answers.has(p.id));
   }
 
   private answerText(socket: Sock, text: string): void {
@@ -403,9 +434,8 @@ export class RoomManager {
   }
 
   private afterAttempt(room: Room): void {
-    // End early once every connected player has locked in.
-    const connected = [...room.players.values()].filter((p) => p.connected);
-    if (connected.length > 0 && connected.every((p) => room.answers.has(p.id))) {
+    // End early once there's nobody left to hear from.
+    if (this.roundComplete(room)) {
       this.endRound(room);
     } else {
       this.broadcast(room);
@@ -423,7 +453,13 @@ export class RoomManager {
 
     for (const p of room.players.values()) {
       const a = room.answers.get(p.id);
-      if (!a) { p.streak = 0; continue; }
+      if (!a) {
+        // In a quiz a teammate may have answered for the whole team — those
+        // players were locked out, so keep their streak. Only a team that stayed
+        // silent loses it.
+        if (spec.kind !== 'quiz' || !this.teamHasAnswered(room, p.team)) p.streak = 0;
+        continue;
+      }
 
       let correct = false;
       let points = 0;
@@ -535,7 +571,7 @@ export class RoomManager {
       this.ensureHost(room);
       this.io.to(room.code).emit('toast', `${name} left`);
       // If the last holdout disconnects mid-round, don't stall it.
-      if (room.phase === 'question' && connected.every((p) => room.answers.has(p.id))) {
+      if (room.phase === 'question' && this.roundComplete(room)) {
         this.endRound(room);
         return;
       }
@@ -638,6 +674,10 @@ export class RoomManager {
   }
 
   private toPublic(room: Room): RoomState {
+    // In a quiz the whole team is done once any teammate answers, so report them
+    // all as answered — that's what locks the options in the UI.
+    const teamLocks = room.phase === 'question' && room.order[room.qIndex]?.kind === 'quiz';
+
     const players: Player[] = [...room.players.values()]
       .map((p) => ({
         id: p.id,
@@ -647,7 +687,7 @@ export class RoomManager {
         isHost: p.id === room.hostId,
         score: p.score,
         streak: p.streak,
-        answered: room.answers.has(p.id),
+        answered: room.answers.has(p.id) || (teamLocks && this.teamHasAnswered(room, p.team)),
       }))
       .sort((a, b) => (a.team === b.team ? b.score - a.score : a.team === 'red' ? -1 : 1));
 

@@ -11,7 +11,10 @@ export default function QuizRound({ round, me }: { round: PublicRound; me: Playe
   const [picked, setPicked] = useState<number | null>(null);
 
   const timeUp = now >= round.endsAt;
-  const locked = picked !== null || timeUp;
+  // The server marks the whole team answered once any teammate locks in, so
+  // `me.answered` without a local pick means a teammate answered for us.
+  const teammateAnswered = me.answered && picked === null;
+  const locked = picked !== null || teammateAnswered || timeUp;
 
   const pick = (i: number) => {
     if (locked) return;
@@ -38,7 +41,12 @@ export default function QuizRound({ round, me }: { round: PublicRound; me: Playe
           ))}
         </div>
         {picked !== null && <p className="locked-note">🔒 Locked in — waiting for the others…</p>}
-        {picked === null && timeUp && <p className="locked-note">⏱ Too slow this round!</p>}
+        {teammateAnswered && !timeUp && (
+          <p className="locked-note">🔒 A teammate answered for your team this round.</p>
+        )}
+        {picked === null && !teammateAnswered && timeUp && (
+          <p className="locked-note">⏱ Too slow this round!</p>
+        )}
       </div>
     </>
   );
