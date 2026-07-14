@@ -1,0 +1,13 @@
+# Cloudflare Pages config for the Quiz Clash client.
+#
+# Pages reads pages_build_output_dir from here, so the "Build output directory"
+# field in the dashboard does not need to be set. The build command still does:
+#   npm install && npm install --prefix client && npm run build --prefix client
+#
+# Only the client is deployed here. The Socket.IO server holds room state in
+# memory and runs on Render -- see README. Remember to set VITE_SERVER_URL as a
+# build-time environment variable in the Pages dashboard, or the client cannot
+# reach the server.
+name = "playgame"
+compatibility_date = "2026-07-14"
+pages_build_output_dir = "client/dist"
