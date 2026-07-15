@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { Server, Socket } from 'socket.io';
 import type {
   AnswerResult,
+  ChatMessage,
   ClientToServerEvents,
   GameId,
   JoinAck,
@@ -28,12 +29,16 @@ const EMPTY_ROOM_TTL_MS = 15 * 60 * 1000;
 const GAME_IDS: GameId[] = ['quiz', 'scramble', 'reaction', 'persona'];
 const PERSONA_POINTS = 200;
 const PERSONA_SECONDS = 90;
+const CHAT_MAX_LEN = 200;
+const CHAT_KEEP = 120;
 const CODE_WORDS = [
   'TIGER', 'EAGLE', 'COBRA', 'PANDA', 'RHINO', 'SHARK', 'WOLF', 'LION',
   'FALCON', 'BISON', 'OTTER', 'GECKO', 'MOOSE', 'PUMA', 'DINGO', 'LEMUR',
 ];
 
-interface InternalPlayer extends Omit<Player, 'answered'> {
+// `answered` and `isCaptain` are derived per-round from room state, not stored
+// on the player, so they're computed in toPublic() rather than kept in sync here.
+interface InternalPlayer extends Omit<Player, 'answered' | 'isCaptain'> {
   socketId: string | null;
 }
 
@@ -56,6 +61,10 @@ interface Room {
   game: GameId;
   players: Map<string, InternalPlayer>;
   hostId: string;
+  /** Who answers for each team in `captain` mode. Null when the team is empty. */
+  captains: Record<Team, string | null>;
+  /** This round's team chat, wiped at the start of every round. */
+  chat: Record<Team, ChatMessage[]>;
   settings: Settings;
   teamScores: Record<Team, number>;
   order: RoundSpec[];
@@ -102,13 +111,15 @@ export class RoomManager {
     socket.on('rejoin', (code, playerId, ack) => this.rejoin(socket, code, playerId, ack));
     socket.on('switch_team', () => this.switchTeam(socket));
     socket.on('shuffle_teams', () => this.shuffleTeams(socket));
+    socket.on('claim_captain', () => this.claimCaptain(socket));
+    socket.on('chat', (t) => this.chat(socket, t));
     socket.on('select_game', (game) => this.selectGame(socket, game));
     socket.on('update_settings', (s) => this.updateSettings(socket, s));
     socket.on('start_game', () => this.startGame(socket));
     socket.on('answer', (i) => this.answerQuiz(socket, i));
     socket.on('answer_text', (t) => this.answerText(socket, t));
     socket.on('tap', () => this.tap(socket));
-    socket.on('play_again', () => this.playAgain(socket));
+    socket.on('play_again', (game) => this.playAgain(socket, game));
     socket.on('end_match', () => this.endMatch(socket));
     socket.on('leave_room', () => this.leave(socket));
     socket.on('disconnect', () => this.onDisconnect(socket));
@@ -127,7 +138,9 @@ export class RoomManager {
       game: 'quiz',
       players: new Map(),
       hostId: '',
-      settings: { rounds: 10, secondsPerQuestion: 15 },
+      captains: { red: null, blue: null },
+      chat: { red: [], blue: [] },
+      settings: { rounds: 10, secondsPerQuestion: 15, answerMode: 'race' },
       teamScores: { red: 0, blue: 0 },
       order: [],
       qIndex: -1,
@@ -171,7 +184,10 @@ export class RoomManager {
     socket.data.playerId = player.id;
     socket.join(room.code);
     this.cancelCleanup(room);
+    this.ensureCaptains(room);
     ack({ ok: true, playerId: player.id, code: room.code });
+    // A refresh mid-question shouldn't lose the discussion.
+    if (room.phase === 'question') socket.emit('chat_history', room.chat[player.team]);
     this.broadcast(room);
   }
 
@@ -198,7 +214,80 @@ export class RoomManager {
     socket.data.playerId = player.id;
     socket.join(room.code);
     this.cancelCleanup(room);
+    // First player on a team captains it until someone claims the badge.
+    this.ensureCaptains(room);
     return player;
+  }
+
+  // ---------- captains ----------
+
+  /**
+   * Every team with a connected player must have exactly one captain, or in
+   * `captain` mode that team could never answer. Call after anything that moves
+   * players between teams or drops them.
+   */
+  private ensureCaptains(room: Room): void {
+    for (const team of ['red', 'blue'] as Team[]) {
+      const current = room.captains[team] ? room.players.get(room.captains[team]!) : undefined;
+      const stillValid = current && current.connected && current.team === team;
+      if (stillValid) continue;
+      const heir = [...room.players.values()].find((p) => p.team === team && p.connected);
+      room.captains[team] = heir?.id ?? null;
+    }
+  }
+
+  private claimCaptain(socket: Sock): void {
+    const ctx = this.ctx(socket);
+    if (!ctx) return;
+    const { room, player } = ctx;
+    // Not mid-question: swapping captain while the clock runs would let a team
+    // take a second bite at a question they'd already committed to.
+    if (room.phase === 'question') {
+      return this.toastTo(socket, '🧢 You can only change captain between rounds.');
+    }
+    if (room.captains[player.team] === player.id) return;
+    room.captains[player.team] = player.id;
+    this.io.to(room.code).emit('toast', `🧢 ${player.name} is now ${player.team.toUpperCase()} captain`);
+    this.broadcast(room);
+  }
+
+  private isCaptain(room: Room, player: InternalPlayer): boolean {
+    return room.captains[player.team] === player.id;
+  }
+
+  // ---------- team chat ----------
+
+  private chat(socket: Sock, text: string): void {
+    const ctx = this.ctx(socket);
+    if (!ctx) return;
+    const { room, player } = ctx;
+    // Chat is for working out the answer, so it's open only while a question is live.
+    if (room.phase !== 'question') return;
+    const clean = typeof text === 'string' ? text.trim().slice(0, CHAT_MAX_LEN) : '';
+    if (!clean) return;
+
+    const msg: ChatMessage = {
+      id: randomUUID(),
+      playerId: player.id,
+      name: player.name,
+      team: player.team,
+      text: clean,
+      at: Date.now(),
+    };
+    const log = room.chat[player.team];
+    log.push(msg);
+    if (log.length > CHAT_KEEP) log.splice(0, log.length - CHAT_KEEP);
+
+    this.emitToTeam(room, player.team, (s) => s.emit('chat', msg));
+  }
+
+  /** Send only to sockets on one team — the other team must never see this. */
+  private emitToTeam(room: Room, team: Team, send: (s: Sock) => void): void {
+    for (const p of room.players.values()) {
+      if (p.team !== team || !p.connected || !p.socketId) continue;
+      const s = this.io.sockets.sockets.get(p.socketId) as Sock | undefined;
+      if (s) send(s);
+    }
   }
 
   // ---------- lobby actions ----------
@@ -207,6 +296,7 @@ export class RoomManager {
     const ctx = this.ctx(socket);
     if (!ctx || ctx.room.phase !== 'lobby') return;
     ctx.player.team = ctx.player.team === 'red' ? 'blue' : 'red';
+    this.ensureCaptains(ctx.room);
     this.broadcast(ctx.room);
   }
 
@@ -215,6 +305,7 @@ export class RoomManager {
     if (!ctx || ctx.room.phase !== 'lobby' || !this.isHost(ctx)) return;
     const players = shuffle([...ctx.room.players.values()]);
     players.forEach((p, i) => { p.team = i < Math.ceil(players.length / 2) ? 'red' : 'blue'; });
+    this.ensureCaptains(ctx.room);
     this.broadcast(ctx.room);
   }
 
@@ -232,6 +323,7 @@ export class RoomManager {
     ctx.room.settings = {
       rounds: clamp(s.rounds, 3, 20),
       secondsPerQuestion: clamp(s.secondsPerQuestion, 10, 30),
+      answerMode: s.answerMode === 'captain' ? 'captain' : 'race',
     };
     this.broadcast(ctx.room);
   }
@@ -279,10 +371,13 @@ export class RoomManager {
     }
   }
 
-  private playAgain(socket: Sock): void {
+  private playAgain(socket: Sock, game?: GameId): void {
     const ctx = this.ctx(socket);
     if (!ctx || ctx.room.phase !== 'final' || !this.isHost(ctx)) return;
     const room = ctx.room;
+    // The winners' screen offers the other games, so a rematch can switch game
+    // without anyone leaving the room or re-sharing the code.
+    if (game && GAME_IDS.includes(game)) room.game = game;
     room.phase = 'lobby';
     room.reveal = null;
     room.winner = null;
@@ -322,6 +417,11 @@ export class RoomManager {
     const spec = room.order[room.qIndex];
     room.phase = 'question';
     room.answers.clear();
+    // Each question gets a fresh discussion; last round's chatter isn't a hint.
+    room.chat = { red: [], blue: [] };
+    for (const team of ['red', 'blue'] as Team[]) {
+      this.emitToTeam(room, team, (s) => s.emit('chat_history', []));
+    }
     room.reveal = null;
     room.qStartedAt = Date.now();
     if (spec.kind === 'reaction') {
@@ -348,6 +448,9 @@ export class RoomManager {
     if (!ctx) return;
     const { room, player, spec } = ctx;
     if (spec.kind !== 'quiz') return;
+    if (this.captainBlocks(room, player, spec.kind)) {
+      return this.toastTo(socket, '🧢 Only your captain can answer — tell them in team chat!');
+    }
     // A quiz team answers as one: the first teammate to lock in speaks for the
     // whole team. Without this an uneven match (2 reds vs 1 blue) would let the
     // bigger team score twice on the same question.
@@ -366,6 +469,27 @@ export class RoomManager {
     return false;
   }
 
+  /**
+   * Rounds where a team answers as one unit rather than player-by-player.
+   * Quiz and Reaction always do — the first teammate in (or the first to tap,
+   * even on a false start) uses up the team's one attempt. Scramble and Persona
+   * only do so in captain mode.
+   */
+  private teamBased(room: Room, kind: RoundSpec['kind'] | undefined): boolean {
+    if (!kind) return false;
+    if (kind === 'quiz' || kind === 'reaction') return true;
+    return room.settings.answerMode === 'captain';
+  }
+
+  /**
+   * In captain mode everyone but the captain is a spectator with a keyboard.
+   * Reaction is exempt: it's a reflex race, so any teammate may take the tap.
+   */
+  private captainBlocks(room: Room, player: InternalPlayer, kind: RoundSpec['kind']): boolean {
+    if (room.settings.answerMode !== 'captain' || kind === 'reaction') return false;
+    return !this.isCaptain(room, player);
+  }
+
   /** Teams that still have someone connected to play for them. */
   private activeTeams(room: Room): Team[] {
     const teams = new Set<Team>();
@@ -374,13 +498,27 @@ export class RoomManager {
   }
 
   /**
-   * Is there nothing left to wait for? Quiz rounds are answered per team, every
-   * other game is answered per player, so the bar for "everyone is done" differs.
+   * Reaction Rush is winner-takes-all: only the single fastest clean tap scores,
+   * and the other team gets nothing. Returns the winning player's id, if any.
+   */
+  private reactionWinnerId(room: Room): string | null {
+    let bestId: string | null = null;
+    let bestMs = Infinity;
+    for (const [id, a] of room.answers) {
+      if (a.falseStart || a.reactionMs === undefined) continue;
+      if (a.reactionMs < bestMs) { bestMs = a.reactionMs; bestId = id; }
+    }
+    return bestId;
+  }
+
+  /**
+   * Is there nothing left to wait for? Team-answered rounds need one attempt per
+   * team; the rest need one from every player, so the bar differs.
    */
   private roundComplete(room: Room): boolean {
     const connected = [...room.players.values()].filter((p) => p.connected);
     if (connected.length === 0) return false;
-    if (room.order[room.qIndex]?.kind === 'quiz') {
+    if (this.teamBased(room, room.order[room.qIndex]?.kind)) {
       return this.activeTeams(room).every((t) => this.teamHasAnswered(room, t));
     }
     return connected.every((p) => room.answers.has(p.id));
@@ -393,6 +531,12 @@ export class RoomManager {
     if (Date.now() > room.qEndsAt + ANSWER_GRACE_MS) return;
     const spec = room.order[room.qIndex];
     if (!spec || (spec.kind !== 'scramble' && spec.kind !== 'persona')) return;
+    if (this.captainBlocks(room, player, spec.kind)) {
+      return this.toastTo(socket, '🧢 Only your captain can answer — tell them in team chat!');
+    }
+    // In captain mode the captain answers for everyone, so a teammate's earlier
+    // solve (from a mode change mid-match) must not unlock a second attempt.
+    if (this.teamBased(room, spec.kind) && this.teamHasAnswered(room, player.team)) return;
     if (room.answers.has(player.id)) return;
     const guess = typeof text === 'string' ? text.trim().toUpperCase() : '';
     if (!guess) return;
@@ -422,15 +566,24 @@ export class RoomManager {
     if (!ctx) return;
     const { room, player, spec } = ctx;
     if (spec.kind !== 'reaction') return;
-    if (room.answers.has(player.id)) return;
+    // One tap per team. A false start burns it — jump the gun and your team is
+    // out for the round. (Captain mode deliberately does NOT gate this: a reflex
+    // race has nothing to discuss, so everyone may race for their team's tap.)
+    if (this.teamHasAnswered(room, player.team)) return;
 
     const now = Math.min(Date.now(), room.qEndsAt);
     if (now < room.goAt) {
       room.answers.set(player.id, { at: now, falseStart: true });
-    } else {
-      room.answers.set(player.id, { at: now, reactionMs: now - room.goAt });
+      this.toastTo(socket, '😬 False start — your team is out this round!');
+      // Both teams may still be waiting, so let the round run on.
+      this.afterAttempt(room);
+      return;
     }
-    this.afterAttempt(room);
+
+    room.answers.set(player.id, { at: now, reactionMs: now - room.goAt });
+    // The first clean tap takes the round outright: nobody tapping later can be
+    // faster, so end it immediately and award only this player.
+    this.endRound(room);
   }
 
   private afterAttempt(room: Room): void {
@@ -450,14 +603,16 @@ export class RoomManager {
     const duration = room.settings.secondsPerQuestion * 1000;
     const results: AnswerResult[] = [];
     const roundPoints: Record<Team, number> = { red: 0, blue: 0 };
+    const tapWinner = spec.kind === 'reaction' ? this.reactionWinnerId(room) : null;
 
     for (const p of room.players.values()) {
       const a = room.answers.get(p.id);
       if (!a) {
-        // In a quiz a teammate may have answered for the whole team — those
-        // players were locked out, so keep their streak. Only a team that stayed
-        // silent loses it.
-        if (spec.kind !== 'quiz' || !this.teamHasAnswered(room, p.team)) p.streak = 0;
+        // A teammate (or the captain) may have answered for the whole team —
+        // those players were locked out, so keep their streak. Only a team that
+        // stayed silent loses it.
+        const spokenFor = this.teamBased(room, spec.kind) && this.teamHasAnswered(room, p.team);
+        if (!spokenFor) p.streak = 0;
         continue;
       }
 
@@ -483,9 +638,11 @@ export class RoomManager {
       } else {
         result.falseStart = a.falseStart;
         result.reactionMs = a.reactionMs;
-        if (!a.falseStart && a.reactionMs !== undefined) {
+        // Winner takes all: only the fastest clean tap in the room scores. A
+        // slower tap still shows its time on the reveal, but earns nothing.
+        if (p.id === tapWinner) {
           correct = true;
-          points = Math.max(10, 200 - Math.round(a.reactionMs / 10));
+          points = Math.max(10, 200 - Math.round(a.reactionMs! / 10));
         }
       }
 
@@ -569,6 +726,9 @@ export class RoomManager {
       this.scheduleCleanup(room);
     } else {
       this.ensureHost(room);
+      // If the captain walked out mid-match, hand the badge on — otherwise in
+      // captain mode their team could never answer again.
+      this.ensureCaptains(room);
       this.io.to(room.code).emit('toast', `${name} left`);
       // If the last holdout disconnects mid-round, don't stall it.
       if (room.phase === 'question' && this.roundComplete(room)) {
@@ -674,9 +834,10 @@ export class RoomManager {
   }
 
   private toPublic(room: Room): RoomState {
-    // In a quiz the whole team is done once any teammate answers, so report them
-    // all as answered — that's what locks the options in the UI.
-    const teamLocks = room.phase === 'question' && room.order[room.qIndex]?.kind === 'quiz';
+    // In a team-answered round the whole team is done once any teammate answers,
+    // so report them all as answered — that's what locks the options in the UI.
+    const teamLocks =
+      room.phase === 'question' && this.teamBased(room, room.order[room.qIndex]?.kind);
 
     const players: Player[] = [...room.players.values()]
       .map((p) => ({
@@ -685,6 +846,7 @@ export class RoomManager {
         team: p.team,
         connected: p.connected,
         isHost: p.id === room.hostId,
+        isCaptain: room.captains[p.team] === p.id,
         score: p.score,
         streak: p.streak,
         answered: room.answers.has(p.id) || (teamLocks && this.teamHasAnswered(room, p.team)),

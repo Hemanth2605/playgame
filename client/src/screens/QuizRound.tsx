@@ -6,7 +6,14 @@ import TimerBar from './TimerBar';
 
 export const OPTION_TAGS = ['A', 'B', 'C', 'D'];
 
-export default function QuizRound({ round, me }: { round: PublicRound; me: Player }) {
+interface Props {
+  round: PublicRound;
+  me: Player;
+  /** False for non-captains in captain mode — they advise instead of answering. */
+  canAnswer: boolean;
+}
+
+export default function QuizRound({ round, me, canAnswer }: Props) {
   const now = useNow();
   const [picked, setPicked] = useState<number | null>(null);
 
@@ -14,7 +21,7 @@ export default function QuizRound({ round, me }: { round: PublicRound; me: Playe
   // The server marks the whole team answered once any teammate locks in, so
   // `me.answered` without a local pick means a teammate answered for us.
   const teammateAnswered = me.answered && picked === null;
-  const locked = picked !== null || teammateAnswered || timeUp;
+  const locked = picked !== null || teammateAnswered || timeUp || !canAnswer;
 
   const pick = (i: number) => {
     if (locked) return;
@@ -41,10 +48,17 @@ export default function QuizRound({ round, me }: { round: PublicRound; me: Playe
           ))}
         </div>
         {picked !== null && <p className="locked-note">🔒 Locked in — waiting for the others…</p>}
-        {teammateAnswered && !timeUp && (
-          <p className="locked-note">🔒 A teammate answered for your team this round.</p>
+        {!canAnswer && !teammateAnswered && !timeUp && (
+          <p className="locked-note">🧢 Your captain picks — tell them below.</p>
         )}
-        {picked === null && !teammateAnswered && timeUp && (
+        {teammateAnswered && !timeUp && (
+          <p className="locked-note">
+            {canAnswer
+              ? '🔒 A teammate answered for your team this round.'
+              : '🔒 Your captain has answered for the team.'}
+          </p>
+        )}
+        {picked === null && !teammateAnswered && canAnswer && timeUp && (
           <p className="locked-note">⏱ Too slow this round!</p>
         )}
       </div>

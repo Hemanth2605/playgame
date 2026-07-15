@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { JoinAck, RoomState } from '../../shared/types';
+import type { ChatMessage, JoinAck, RoomState } from '../../shared/types';
 import { socket } from './socket';
 import Landing from './screens/Landing';
 import Lobby from './screens/Lobby';
@@ -21,10 +21,15 @@ export default function App() {
   const [playerId, setPlayerId] = useState<string | null>(null);
   const [connected, setConnected] = useState(socket.connected);
   const [toast, setToast] = useState<string | null>(null);
+  // Team chat for the current round only. The server sends a fresh (empty)
+  // history at the start of each round, which is what clears this.
+  const [chat, setChat] = useState<ChatMessage[]>([]);
   const toastTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const onState = (s: RoomState) => setRoom(s);
+    const onChat = (m: ChatMessage) => setChat((prev) => [...prev, m]);
+    const onChatHistory = (ms: ChatMessage[]) => setChat(ms);
     const onToast = (m: string) => {
       setToast(m);
       window.clearTimeout(toastTimer.current);
@@ -50,12 +55,16 @@ export default function App() {
 
     socket.on('room_state', onState);
     socket.on('toast', onToast);
+    socket.on('chat', onChat);
+    socket.on('chat_history', onChatHistory);
     socket.on('connect', onConnect);
     socket.on('disconnect', onDisconnect);
     if (socket.connected) onConnect();
     return () => {
       socket.off('room_state', onState);
       socket.off('toast', onToast);
+      socket.off('chat', onChat);
+      socket.off('chat_history', onChatHistory);
       socket.off('connect', onConnect);
       socket.off('disconnect', onDisconnect);
     };
@@ -81,7 +90,15 @@ export default function App() {
   } else if (room.phase === 'lobby') {
     screen = <Lobby room={room} me={me} onLeave={handleLeave} />;
   } else if (room.phase === 'question' && room.round) {
-    screen = <RoundView key={`${room.game}-${room.round.index}`} room={room} me={me} onLeave={handleLeave} />;
+    screen = (
+      <RoundView
+        key={`${room.game}-${room.round.index}`}
+        room={room}
+        me={me}
+        chat={chat}
+        onLeave={handleLeave}
+      />
+    );
   } else if (room.phase === 'reveal' && room.reveal) {
     screen = <RevealView room={room} me={me} onLeave={handleLeave} />;
   } else if (room.phase === 'final') {

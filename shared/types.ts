@@ -5,21 +5,45 @@ export type Team = 'red' | 'blue';
 export type Phase = 'lobby' | 'question' | 'reveal' | 'final';
 export type GameId = 'quiz' | 'scramble' | 'reaction' | 'persona';
 
+/**
+ * How a team commits to an answer.
+ * - `race`    — anyone may answer; the first teammate in locks the team.
+ * - `captain` — only the team's captain may answer; the rest advise in team chat.
+ * Reaction Rush ignores this: it is a reflex race, so everyone always taps.
+ */
+export type AnswerMode = 'race' | 'captain';
+
 export interface Player {
   id: string;
   name: string;
   team: Team;
   connected: boolean;
   isHost: boolean;
+  /** Speaks for the team in `captain` mode. Exactly one per team, when the team has anyone in it. */
+  isCaptain: boolean;
   score: number;
   streak: number;
-  /** Has this player finished the current round (answered / solved / tapped)? */
+  /**
+   * Is this player done for the round? In team-answered rounds every teammate
+   * flips to `true` the moment one of them answers — that is what locks the UI.
+   */
   answered: boolean;
 }
 
 export interface Settings {
   rounds: number;
   secondsPerQuestion: number;
+  answerMode: AnswerMode;
+}
+
+/** A team-private chat message. Only ever sent to sockets on that team. */
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  name: string;
+  team: Team;
+  text: string;
+  at: number;
 }
 
 /** Round data as clients see it — never includes the correct answer. */
@@ -89,13 +113,18 @@ export interface ClientToServerEvents {
   rejoin: (code: string, playerId: string, ack: (res: JoinAck) => void) => void;
   switch_team: () => void;
   shuffle_teams: () => void;
+  /** Take the captain badge for your own team. Not allowed mid-question. */
+  claim_captain: () => void;
+  /** Say something to your team only. Only accepted during a question. */
+  chat: (text: string) => void;
   select_game: (game: GameId) => void;
   update_settings: (settings: Settings) => void;
   start_game: () => void;
   answer: (optionIndex: number) => void;
   answer_text: (text: string) => void;
   tap: () => void;
-  play_again: () => void;
+  /** Back to the lobby with the same room and players. Pass a game to switch to it. */
+  play_again: (game?: GameId) => void;
   end_match: () => void;
   leave_room: () => void;
 }
@@ -103,4 +132,8 @@ export interface ClientToServerEvents {
 export interface ServerToClientEvents {
   room_state: (state: RoomState) => void;
   toast: (message: string) => void;
+  /** One new team-chat message, delivered only to that team. */
+  chat: (message: ChatMessage) => void;
+  /** This round's team chat so far — sent on (re)connect so a refresh doesn't lose it. */
+  chat_history: (messages: ChatMessage[]) => void;
 }

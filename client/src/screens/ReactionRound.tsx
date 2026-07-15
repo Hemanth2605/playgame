@@ -12,7 +12,10 @@ export default function ReactionRound({ round, me }: { round: PublicRound; me: P
 
   const isGo = now >= round.goAt!;
   const timeUp = now >= round.endsAt;
-  const done = tap !== 'none' || me.answered || timeUp;
+  // The server flips every teammate to `answered` once one of them taps, so this
+  // means a teammate used the team's single tap before we did.
+  const teammateTapped = me.answered && tap === 'none';
+  const done = tap !== 'none' || teammateTapped || timeUp;
 
   const onTap = () => {
     if (done) return;
@@ -25,10 +28,13 @@ export default function ReactionRound({ round, me }: { round: PublicRound; me: P
   let label = 'Wait for green…';
   if (tap === 'early') {
     cls = 'reaction-pad early';
-    label = '😬 Too early! False start.';
+    label = '😬 Too early! Your team is out this round.';
   } else if (tap === 'tapped') {
     cls = 'reaction-pad done';
-    label = `⚡ ~${Math.max(0, tappedAt - round.goAt!)}ms — waiting for the others…`;
+    label = `⚡ ~${Math.max(0, tappedAt - round.goAt!)}ms — you tapped for the team!`;
+  } else if (teammateTapped) {
+    cls = 'reaction-pad done';
+    label = '🔒 A teammate already tapped for your team.';
   } else if (timeUp) {
     cls = 'reaction-pad early';
     label = '⏱ Missed it!';
@@ -43,7 +49,10 @@ export default function ReactionRound({ round, me }: { round: PublicRound; me: P
       <button className={cls} onClick={onTap} disabled={done}>
         {label}
       </button>
-      <p className="hint">Tap the panel the instant it turns green. Tapping early scores nothing!</p>
+      <p className="hint">
+        <b>Fastest tap in the room wins the round</b> — the other team gets nothing.
+        One tap per team, so a false start burns your team's turn!
+      </p>
     </div>
   );
 }

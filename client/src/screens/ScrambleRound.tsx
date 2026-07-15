@@ -4,7 +4,14 @@ import { socket } from '../socket';
 import { useNow } from '../hooks';
 import TimerBar from './TimerBar';
 
-export default function ScrambleRound({ round, me }: { round: PublicRound; me: Player }) {
+interface Props {
+  round: PublicRound;
+  me: Player;
+  /** False for non-captains in captain mode — they advise instead of typing. */
+  canAnswer: boolean;
+}
+
+export default function ScrambleRound({ round, me, canAnswer }: Props) {
   const now = useNow();
   const [guess, setGuess] = useState('');
 
@@ -33,6 +40,8 @@ export default function ScrambleRound({ round, me }: { round: PublicRound; me: P
 
         {solved ? (
           <p className="my-result good">✅ Got it! Waiting for the others…</p>
+        ) : !canAnswer ? (
+          <p className="locked-note">🧢 Your captain types the answer — tell them below.</p>
         ) : timeUp ? (
           <p className="locked-note">⏱ Time's up!</p>
         ) : (

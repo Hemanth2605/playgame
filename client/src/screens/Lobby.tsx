@@ -9,7 +9,18 @@ interface Props {
   onLeave: () => void;
 }
 
-function TeamColumn({ team, players, meId }: { team: Team; players: Player[]; meId: string }) {
+interface TeamColumnProps {
+  team: Team;
+  players: Player[];
+  meId: string;
+  /** True when this is the viewer's own team — only then can they claim the badge. */
+  isMyTeam: boolean;
+  showCaptain: boolean;
+}
+
+function TeamColumn({ team, players, meId, isMyTeam, showCaptain }: TeamColumnProps) {
+  const iAmCaptain = players.some((p) => p.id === meId && p.isCaptain);
+
   return (
     <div className={`team-col team-${team}`}>
       <h3 className="team-title">{team === 'red' ? 'RED' : 'BLUE'} <span className="team-count">({players.length})</span></h3>
@@ -17,12 +28,18 @@ function TeamColumn({ team, players, meId }: { team: Team; players: Player[]; me
         {players.map((p) => (
           <li key={p.id} className={`player-chip ${p.connected ? '' : 'offline'} ${p.id === meId ? 'is-me' : ''}`}>
             {p.isHost && <span title="Host">👑 </span>}
+            {showCaptain && p.isCaptain && <span title="Captain — answers for the team">🧢 </span>}
             {p.name}
             {p.id === meId && <span className="me-tag"> (you)</span>}
           </li>
         ))}
         {players.length === 0 && <li className="player-chip empty">nobody yet</li>}
       </ul>
+      {showCaptain && isMyTeam && !iAmCaptain && players.length > 0 && (
+        <button className="btn btn-link" onClick={() => socket.emit('claim_captain')}>
+          🧢 Be our captain
+        </button>
+      )}
     </div>
   );
 }
@@ -33,6 +50,9 @@ export default function Lobby({ room, me, onLeave }: Props) {
   const red = room.players.filter((p) => p.team === 'red');
   const blue = room.players.filter((p) => p.team === 'blue');
   const selected = gameInfo(room.game);
+  const captainMode = room.settings.answerMode === 'captain';
+  // Reaction Rush is a reflex race — a captain can't tap for the team.
+  const modeApplies = room.game !== 'reaction';
 
   const copyCode = async () => {
     try {
@@ -59,9 +79,9 @@ export default function Lobby({ room, me, onLeave }: Props) {
       </div>
 
       <div className="teams-grid">
-        <TeamColumn team="red" players={red} meId={me.id} />
+        <TeamColumn team="red" players={red} meId={me.id} isMyTeam={me.team === 'red'} showCaptain={captainMode} />
         <div className="vs-badge">VS</div>
-        <TeamColumn team="blue" players={blue} meId={me.id} />
+        <TeamColumn team="blue" players={blue} meId={me.id} isMyTeam={me.team === 'blue'} showCaptain={captainMode} />
       </div>
 
       <div className="lobby-actions">
@@ -124,12 +144,34 @@ export default function Lobby({ room, me, onLeave }: Props) {
               </label>
             )}
           </div>
+          {modeApplies && (
+            <div className="mode-row">
+              <span className="mode-label">Who answers?</span>
+              <div className="mode-options">
+                <button
+                  className={`mode-btn ${!captainMode ? 'selected' : ''}`}
+                  onClick={() => setSettings({ answerMode: 'race' })}
+                >
+                  ⚡ Anyone <small>first teammate to answer locks the team</small>
+                </button>
+                <button
+                  className={`mode-btn ${captainMode ? 'selected' : ''}`}
+                  onClick={() => setSettings({ answerMode: 'captain' })}
+                >
+                  🧢 Captain only <small>the team discusses, the captain answers</small>
+                </button>
+              </div>
+            </div>
+          )}
           <button className="btn btn-primary btn-big" onClick={() => socket.emit('start_game')}>
             ▶ Start {selected.name}
           </button>
         </div>
       ) : (
-        <p className="hint">Waiting for the host to start {selected.emoji} {selected.name}…</p>
+        <p className="hint">
+          Waiting for the host to start {selected.emoji} {selected.name}…
+          {modeApplies && (captainMode ? ' 🧢 Captain answers.' : ' ⚡ Anyone can answer.')}
+        </p>
       )}
 
       <button className="btn btn-link" onClick={onLeave}>Leave room</button>

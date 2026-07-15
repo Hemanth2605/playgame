@@ -4,7 +4,14 @@ import { socket } from '../socket';
 import { useNow } from '../hooks';
 import TimerBar from './TimerBar';
 
-export default function PersonaRound({ round, me }: { round: PublicRound; me: Player }) {
+interface Props {
+  round: PublicRound;
+  me: Player;
+  /** False for non-captains in captain mode — they advise instead of guessing. */
+  canAnswer: boolean;
+}
+
+export default function PersonaRound({ round, me, canAnswer }: Props) {
   const now = useNow();
   const [guess, setGuess] = useState('');
 
@@ -13,7 +20,7 @@ export default function PersonaRound({ round, me }: { round: PublicRound; me: Pl
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const g = guess.trim();
-    if (!g || timeUp) return;
+    if (!g || timeUp || !canAnswer) return;
     socket.emit('answer_text', g);
     setGuess('');
   };
@@ -33,7 +40,9 @@ export default function PersonaRound({ round, me }: { round: PublicRound; me: Pl
         </div>
         <p className="hint">Who is this? <b>First correct answer wins the round!</b></p>
 
-        {timeUp ? (
+        {!canAnswer ? (
+          <p className="locked-note">🧢 Your captain guesses — tell them below.</p>
+        ) : timeUp ? (
           <p className="locked-note">⏱ Time's up!</p>
         ) : (
           <form className="join-row" onSubmit={submit}>
